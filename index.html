@@ -211,10 +211,6 @@
   .amt.plus{color:#4E9C83;font-weight:600;}
   .amt.minus{color:#C9708A;font-weight:600;}
 
-  /* ---------- meals ---------- */
-  .meal{display:flex;flex-direction:column;gap:6px;margin-bottom:12px;}
-  .meal label{font-size:12.5px;color:var(--muted);}
-
   /* ---------- chat ---------- */
   .chat-wrap{display:flex;flex-direction:column;gap:10px;}
   .bubble-row{display:flex;gap:8px;align-items:flex-end;}
@@ -409,28 +405,6 @@
     </div>
   </section>
 
-  <!-- ================= 식사 ================= -->
-  <section id="view-meals" class="view hidden">
-    <div class="card">
-      <div class="card-head">
-        <h2>오늘의 식사</h2>
-        <span class="mini" id="mealDate"></span>
-      </div>
-      <div class="meal"><label>아침</label><div class="field"><input id="mealBreakfast" placeholder="예) 계란토스트, 우유"></div></div>
-      <div class="meal"><label>점심</label><div class="field"><input id="mealLunch" placeholder="예) 김치볶음밥"></div></div>
-      <div class="meal"><label>저녁</label><div class="field"><input id="mealDinner" placeholder="예) 된장찌개, 불고기"></div></div>
-      <p class="mini" id="mealSaved">적는 대로 자동 저장됩니다.</p>
-    </div>
-    <div class="card">
-      <div class="card-head"><h2>장 볼 것</h2><span class="mini">가족 공용 메모</span></div>
-      <div id="shoppingList"></div>
-      <div class="add-row">
-        <div class="field"><input id="shopInput" placeholder="예) 우유, 바나나" enterkeyhint="done"></div>
-        <button class="btn" data-act="shop-add">+ 추가</button>
-      </div>
-    </div>
-  </section>
-
   <!-- ================= 일정 ================= -->
   <section id="view-schedule" class="view hidden">
     <div class="card">
@@ -448,26 +422,6 @@
     <div class="card">
       <div class="card-head"><h2>오늘 메모</h2><span class="mini">자유롭게</span></div>
       <textarea class="field" id="todayMemo" rows="5" placeholder="오늘 있었던 일, 준비물, 잊지 말 것…"></textarea>
-    </div>
-  </section>
-
-  <!-- ================= 건강 ================= -->
-  <section id="view-health" class="view hidden">
-    <div class="card">
-      <div class="card-head">
-        <h2>약 · 체온</h2>
-        <span class="mini" id="healthDate"></span>
-      </div>
-      <div class="seg" id="healthSeg" style="margin-bottom:14px;"></div>
-      <div id="healthBody"></div>
-    </div>
-    <div class="card">
-      <div class="card-head"><h2>체온 기록</h2><span class="mini">최근 5개</span></div>
-      <div class="row" style="margin-bottom:10px;">
-        <div class="field"><input id="tempInput" inputmode="decimal" placeholder="예) 36.7"></div>
-        <button class="btn" data-act="temp-add">기록</button>
-      </div>
-      <div id="tempList"></div>
     </div>
   </section>
 
@@ -574,9 +528,7 @@
     { id: 'home', label: '홈', ico: '🏠' },
     { id: 'tasks', label: '루틴', ico: '☑️' },
     { id: 'study', label: '공부', ico: '📖' },
-    { id: 'meals', label: '식사', ico: '🍚' },
     { id: 'schedule', label: '일정', ico: '📅' },
-    { id: 'health', label: '건강', ico: '💊' },
     { id: 'allowance', label: '용돈', ico: '🐷' },
     { id: 'chat', label: '채팅', ico: '💬' }
   ];
@@ -661,6 +613,7 @@
       study: defaultStudy(),
       ledger: { rona: [], taeri: [] },
       stamps: { rona: {}, taeri: {} },
+      /* 식사·건강 탭은 제거됨. 예전에 저장된 기록은 지우지 않고 그대로 둔다. */
       meals: {},
       memo: {},
       shopping: [],
@@ -669,7 +622,7 @@
       temps: [],
       chat: [],
       mission: { date: '', text: '', done: false },
-      settings: { location: 'pyeongtaek', role: 'mom', locked: false, stampChild: 'rona', taskMember: 'rona', studyChild: 'rona', allowChild: 'rona', healthChild: 'rona' }
+      settings: { location: 'pyeongtaek', role: 'mom', locked: false, stampChild: 'rona', taskMember: 'rona', studyChild: 'rona', allowChild: 'rona' }
     };
   }
 
@@ -773,9 +726,7 @@
     if (ui.tab === 'home') renderHome();
     else if (ui.tab === 'tasks') renderTasks();
     else if (ui.tab === 'study') renderStudy();
-    else if (ui.tab === 'meals') renderMeals();
     else if (ui.tab === 'schedule') renderSchedule();
-    else if (ui.tab === 'health') renderHealth();
     else if (ui.tab === 'allowance') renderAllowance();
     else if (ui.tab === 'chat') renderChat();
   }
@@ -962,31 +913,6 @@
     paintTimer();
   }
 
-  /* ---------- 식사 ---------- */
-  function renderMeals() {
-    var tk = todayKey();
-    var m = state.meals[tk] || {};
-    $('#mealDate').textContent = compactDate(tk);
-    $('#mealBreakfast').value = m.breakfast || '';
-    $('#mealLunch').value = m.lunch || '';
-    $('#mealDinner').value = m.dinner || '';
-    renderShopping();
-  }
-
-  function renderShopping() {
-    var el = $('#shoppingList');
-    if (!state.shopping.length) {
-      el.innerHTML = '<div class="empty">살 것이 없어요.</div>';
-      return;
-    }
-    el.innerHTML = '<div class="list">' + state.shopping.map(function (s) {
-      return '<div class="item ' + (s.done ? 'done' : '') + '">' +
-        '<button class="check" data-act="shop-toggle" data-id="' + s.id + '">' + (s.done ? '✓' : '') + '</button>' +
-        '<span class="label">' + escapeHtml(s.text) + '</span>' +
-        '<button class="del" data-act="shop-del" data-id="' + s.id + '">✕</button></div>';
-    }).join('') + '</div>';
-  }
-
   /* ---------- 일정 ---------- */
   function renderSchedule() {
     var tk = todayKey();
@@ -1009,34 +935,6 @@
         '<span class="label">' + escapeHtml(s.text) + '</span>' +
         '<button class="del" data-act="sched-del" data-id="' + s.id + '">✕</button></div>';
     }).join('') + '</div>';
-  }
-
-  /* ---------- 건강 ---------- */
-  function renderHealth() {
-    var tk = todayKey();
-    $('#healthDate').textContent = compactDate(tk);
-    $('#healthSeg').innerHTML = CHILDREN.map(function (c) {
-      return '<button data-act="health-child" data-child="' + c.id + '" class="' + (state.settings.healthChild === c.id ? 'on' : '') + '">' + c.name + '</button>';
-    }).join('');
-    var cid = state.settings.healthChild;
-    var h = (state.health[tk] && state.health[tk][cid]) || { morning: false, evening: false };
-    $('#healthBody').innerHTML =
-      '<div class="list">' +
-        '<div class="item ' + (h.morning ? 'done' : '') + '">' +
-          '<button class="check" data-act="health-med" data-child="' + cid + '" data-kind="morning">' + (h.morning ? '✓' : '') + '</button>' +
-          '<span class="label">아침약</span></div>' +
-        '<div class="item ' + (h.evening ? 'done' : '') + '">' +
-          '<button class="check" data-act="health-med" data-child="' + cid + '" data-kind="evening">' + (h.evening ? '✓' : '') + '</button>' +
-          '<span class="label">저녁약</span></div>' +
-      '</div>';
-
-    var temps = state.temps.slice(-5).reverse();
-    $('#tempList').innerHTML = temps.length ? '<div class="list">' + temps.map(function (t) {
-      return '<div class="item"><span class="pill" style="flex:0 0 auto;">' + compactDate(t.date) + '</span>' +
-        '<span class="label">' + escapeHtml(t.who) + '</span>' +
-        '<span class="reward" style="font-weight:600;color:' + (Number(t.value) >= 37.5 ? '#C9708A' : '#4E9C83') + ';">' + escapeHtml(t.value) + '℃</span>' +
-        '<button class="del" data-act="temp-del" data-id="' + t.id + '">✕</button></div>';
-    }).join('') + '</div>' : '<div class="empty">기록이 없어요.</div>';
   }
 
   /* ---------- 용돈 ---------- */
@@ -1397,25 +1295,6 @@
     if (act === 'timer-pause') { stopTimer(); return; }
     if (act === 'timer-reset') { resetTimer(); return; }
 
-    /* 장보기 */
-    if (act === 'shop-add') {
-      var sv = $('#shopInput').value.trim();
-      if (!sv) { $('#shopInput').focus(); return; }
-      state.shopping.push({ id: uid(), text: sv, done: false });
-      $('#shopInput').value = '';
-      save(); renderShopping(); return;
-    }
-    if (act === 'shop-toggle') {
-      var sid = target.getAttribute('data-id');
-      state.shopping.forEach(function (s) { if (s.id === sid) s.done = !s.done; });
-      save(); renderShopping(); return;
-    }
-    if (act === 'shop-del') {
-      var sid2 = target.getAttribute('data-id');
-      state.shopping = state.shopping.filter(function (s) { return s.id !== sid2; });
-      save(); renderShopping(); return;
-    }
-
     /* 일정 */
     if (act === 'sched-add') {
       var d = $('#schedDate').value || todayKey();
@@ -1429,31 +1308,6 @@
       var scid = target.getAttribute('data-id');
       state.schedule = state.schedule.filter(function (s) { return s.id !== scid; });
       save(); renderSchedule(); return;
-    }
-
-    /* 건강 */
-    if (act === 'health-child') { state.settings.healthChild = target.getAttribute('data-child'); save(); renderHealth(); return; }
-    if (act === 'health-med') {
-      var hc = target.getAttribute('data-child');
-      var kind = target.getAttribute('data-kind');
-      var tk = todayKey();
-      if (!state.health[tk]) state.health[tk] = {};
-      if (!state.health[tk][hc]) state.health[tk][hc] = { morning: false, evening: false };
-      state.health[tk][hc][kind] = !state.health[tk][hc][kind];
-      save(); renderHealth(); return;
-    }
-    if (act === 'temp-add') {
-      var val = $('#tempInput').value.trim();
-      if (!val) { $('#tempInput').focus(); return; }
-      state.temps.push({ id: uid(), date: todayKey(), who: memberOf(state.settings.healthChild).name, value: val });
-      if (state.temps.length > 60) state.temps = state.temps.slice(-60);
-      $('#tempInput').value = '';
-      save(); renderHealth(); toast('체온을 기록했어요'); return;
-    }
-    if (act === 'temp-del') {
-      var tid = target.getAttribute('data-id');
-      state.temps = state.temps.filter(function (t) { return t.id !== tid; });
-      save(); renderHealth(); return;
     }
 
     /* 용돈 */
@@ -1506,23 +1360,13 @@
     var id = ev.target.id;
     if (id === 'taskInput') { ev.preventDefault(); addTask(); }
     else if (id === 'studyInput') { ev.preventDefault(); addStudy(); }
-    else if (id === 'shopInput') { ev.preventDefault(); var b = document.querySelector('[data-act="shop-add"]'); if (b) b.click(); }
     else if (id === 'schedInput') { ev.preventDefault(); var b2 = document.querySelector('[data-act="sched-add"]'); if (b2) b2.click(); }
     else if (id === 'chatInput') { ev.preventDefault(); sendChat(); }
     else if (id === 'allowAmount' || id === 'allowLabel') { ev.preventDefault(); var b3 = document.querySelector('[data-act="allow-add"]'); if (b3) b3.click(); }
-    else if (id === 'tempInput') { ev.preventDefault(); var b4 = document.querySelector('[data-act="temp-add"]'); if (b4) b4.click(); }
   });
 
   document.addEventListener('change', function (ev) {
     var id = ev.target.id;
-    if (id === 'mealBreakfast' || id === 'mealLunch' || id === 'mealDinner') {
-      var tk = todayKey();
-      if (!state.meals[tk]) state.meals[tk] = {};
-      var field = id === 'mealBreakfast' ? 'breakfast' : (id === 'mealLunch' ? 'lunch' : 'dinner');
-      state.meals[tk][field] = ev.target.value;
-      save();
-      $('#mealSaved').textContent = '저장됨 · ' + nowTime();
-    }
     if (id === 'todayMemo') {
       state.memo[todayKey()] = ev.target.value;
       save();
@@ -1531,13 +1375,6 @@
 
   document.addEventListener('input', function (ev) {
     var id = ev.target.id;
-    if (id === 'mealBreakfast' || id === 'mealLunch' || id === 'mealDinner') {
-      var tk = todayKey();
-      if (!state.meals[tk]) state.meals[tk] = {};
-      var field = id === 'mealBreakfast' ? 'breakfast' : (id === 'mealLunch' ? 'lunch' : 'dinner');
-      state.meals[tk][field] = ev.target.value;
-      save();
-    }
     if (id === 'todayMemo') {
       state.memo[todayKey()] = ev.target.value;
       save();
