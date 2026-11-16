@@ -542,6 +542,7 @@
     applying: false,     /* 남의 변경을 적용하는 중 (다시 밀어 올리지 않기) */
     pendingPush: false,
     pushTimer: null,
+    suppressUntil: 0,     /* 이 기기만 비우는 중에는 서버로 밀지 않기 */
     tick: 0,
     channel: null,
     announced: false
@@ -608,6 +609,7 @@
   /* 가족 공용 기록 올리기 (디바운스) */
   function schedulePush() {
     if (!Sync.client || !Sync.stateTable || Sync.applying) return;
+    if (Date.now() < (Sync.suppressUntil || 0)) return;
     Sync.pendingPush = true;
     clearTimeout(Sync.pushTimer);
     Sync.pushTimer = setTimeout(function () { pushState(); }, 700);
@@ -615,6 +617,7 @@
 
   function pushState() {
     if (!Sync.client || !Sync.stateTable) return;
+    if (Date.now() < (Sync.suppressUntil || 0)) return;
     var payload = JSON.parse(JSON.stringify(state));
     delete payload.chat;   /* 채팅은 family_messages 표가 맞습니다 */
     payload.settings = { location: state.settings.location };
@@ -1654,6 +1657,7 @@
           Sync.firstPull = true;
           Sync.remoteAt = 0;
           Sync.lastMsgAt = '';
+          Sync.suppressUntil = Date.now() + 6000;
           pullState(false);
           toast('이 기기만 비우고 가족 기록을 다시 불러왔어요');
         } else {
