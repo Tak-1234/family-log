@@ -234,6 +234,16 @@
     font-size:12px;color:var(--ink-2);background:var(--bg-2);border:1px solid var(--line);
     border-radius:12px;padding:10px 12px;margin-bottom:12px;line-height:1.45;
   }
+  .banner b{font-weight:700;color:var(--ink);}
+  .banner .dot{
+    display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px;
+    background:var(--muted);vertical-align:1px;
+  }
+  .banner.live{background:#F0FAF5;border-color:#CFEBDD;}
+  .banner.live .dot{background:#4FBF8B;box-shadow:0 0 0 3px rgba(79,191,139,.16);animation:pulse 2.4s ease-in-out infinite;}
+  .banner.warn{background:#FFF7E6;border-color:#F0E0BE;}
+  .banner.warn .dot{background:#E0A94A;box-shadow:0 0 0 3px rgba(224,169,74,.14);}
+  @keyframes pulse{0%,100%{opacity:1;}50%{opacity:.45;}}
 
   /* ---------- bottom nav ---------- */
   nav.tabs{
@@ -461,7 +471,7 @@
         <h2>우리 가족 채팅</h2>
         <button class="pill" data-act="chat-lock" id="lockBtn">🔓 이 기기 잠금</button>
       </div>
-      <div class="banner" id="chatBanner">지금은 <b>이 기기에만 저장</b>되는 모드예요. 같은 기기에서는 로나·태리·엄마·아빠가 함께 볼 수 있고, 다른 기기와 실시간 공유는 다음 단계에서 연결할 수 있어요.</div>
+      <div class="banner" id="chatBanner"><span class="dot"></span><b>연결 대기 중</b> · 지금은 이 기기에 저장되고 있어요.</div>
       <div class="seg" id="roleSeg" style="margin-bottom:12px;"></div>
       <div class="chat-wrap grow" id="chatList" style="overflow-y:auto;max-height:46vh;min-height:120px;"></div>
       <div class="stickers" id="stickerRow"></div>
@@ -484,19 +494,24 @@
 </div>
 <div class="toast" id="toast"></div>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
 (function () {
   'use strict';
 
   /* =========================================================
-     DataStore — 기기 저장 어댑터
-     지금은 localStorage. 실시간 공유는 아래 인터페이스만 같으면
-     Supabase / Firebase 로 갈아끼울 수 있어요.
-       DataStore.load()            -> Promise<state|null>
-       DataStore.save(state)       -> Promise<void>
-       DataStore.reset()           -> Promise<void>
+     DataStore — 기기 저장 + 가족 공용 저장소
+     · localStorage : 이 기기의 빠른 캐시이자 오프라인 대체 저장소
+     · Supabase     : 가족이 같이 보는 공용 기록
+         public.family_state     id='tak-family-main' 1행 · data jsonb
+         public.family_messages  가족 채팅(쌓이기만 하는 기록)
+       DataStore.load() / save(state) / reset()
      ========================================================= */
   var STORE_KEY = 'familylog.v1';
+  var META_KEY = 'familylog.sync.v1';
+  var SB_URL = 'https://uleyjiaiwjondlvmxveg.supabase.co';
+  var SB_KEY = 'sb_publishable_LzFBahs2V6hu8ESZwT5fgA_h9KaHynb';
+  var FAMILY_ID = 'tak-family-main';
 
   var DataStore = {
     mode: 'local',
@@ -514,6 +529,397 @@
       try { window.localStorage.removeItem(STORE_KEY); } catch (e) {}
     }
   };
+
+  /* ---------------- 실시간 동기화 ---------------- */
+  var Sync = {
+    client: null,
+    status: 'idle',      /* idle · waiting · live · error · offline */
+    stateTable: false,   /* family_state 표가 살아 있는지 */
+    msgTable: false,     /* family_messages 표가 살아 있는지 */
+    remoteAt: 0,         /* 마지막으로 확인한 family_state.updated_at (ms) */
+    lastMsgAt: '',       /* 마지막으로 받아 둔 메시지 created_at */
+    firstPull: false,
+    applying: false,     /* 남의 변경을 적용하는 중 (다시 밀어 올리지 않기) */
+    pendingPush: false,
+    pushTimer: null,
+    tick: 0,
+    channel: null,
+    announced: false
+  };
+
+  function readMeta() {
+    try { var raw = window.localStorage.getItem(META_KEY); return raw ? JSON.parse(raw) : {}; }
+    catch (e) { return {}; }
+  }
+  function writeMeta(m) {
+    try { window.localStorage.setItem(META_KEY, JSON.stringify(m)); } catch (e) {}
+  }
+  function markLocalEdit() {
+    var m = readMeta(); m.localAt = Date.now(); writeMeta(m);
+  }
+  function localEditAt() { return Number(readMeta().localAt || 0); }
+
+  function isMissingTable(err) {
+    if (!err) return false;
+    var code = String(err.code || '');
+    var msg = String(err.message || '') + ' ' + String(err.details || '') + ' ' + String(err.hint || '');
+    return code === 'PGRST205' || code === '42P01' || err.status === 404 ||
+      /could not find the table|does not exist|schema cache/i.test(msg);
+  }
+
+  function setSyncStatus(s) {
+    var was = Sync.status;
+    Sync.status = s;
+    renderSyncBadge();
+    if (s === 'live' && was === 'waiting' && !Sync.announced) {
+      Sync.announced = true;
+      toast('가족이랑 실시간으로 이어졌어요 🟢');
+    }
+  }
+
+  function syncError(err) {
+    if (!err) return;
+    if (isMissingTable(err)) { Sync.stateTable = false; setSyncStatus('waiting'); return; }
+    setSyncStatus('error');
+  }
+
+  /* 상단 안내 띠 */
+  function renderSyncBadge() {
+    var el = $('#chatBanner');
+    if (!el) return;
+    var s = Sync.status;
+    var html, cls = 'banner';
+    if (s === 'live') {
+      cls = 'banner live';
+      html = '<span class="dot"></span><b>실시간 가족 연동 중</b> · 엄마·아빠·로나·태리 기기에서 바뀐 내용이 바로 보여요.';
+    } else if (s === 'error') {
+      cls = 'banner warn';
+      html = '<span class="dot"></span><b>연결이 잠깐 끊겼어요</b> · 기록은 이 기기에 계속 저장하고 있어요. 잠시 뒤 저절로 다시 연결해요.';
+    } else if (s === 'offline') {
+      cls = 'banner warn';
+      html = '<span class="dot"></span><b>오프라인</b> · 인터넷이 연결되면 가족 기록과 다시 맞춰요.';
+    } else {
+      html = '<span class="dot"></span><b>연결 대기 중</b> · 지금은 이 기기에 저장되고 있어요. 가족 공용 저장소가 준비되면 저절로 이어져요.';
+    }
+    el.className = cls;
+    el.innerHTML = html;
+  }
+
+  /* 가족 공용 기록 올리기 (디바운스) */
+  function schedulePush() {
+    if (!Sync.client || !Sync.stateTable || Sync.applying) return;
+    Sync.pendingPush = true;
+    clearTimeout(Sync.pushTimer);
+    Sync.pushTimer = setTimeout(function () { pushState(); }, 700);
+  }
+
+  function pushState() {
+    if (!Sync.client || !Sync.stateTable) return;
+    var payload = JSON.parse(JSON.stringify(state));
+    delete payload.chat;   /* 채팅은 family_messages 표가 맞습니다 */
+    payload.settings = { location: state.settings.location };
+    var ts = new Date().toISOString();
+    clearTimeout(Sync.pushTimer);
+    Sync.pendingPush = false;
+    Sync.client.from('family_state')
+      .upsert({ id: FAMILY_ID, data: payload, updated_at: ts }, { onConflict: 'id' })
+      .then(function (res) {
+        if (res.error) { syncError(res.error); return; }
+        Sync.remoteAt = Date.parse(ts) || Date.now();
+        var m = readMeta(); m.localAt = Sync.remoteAt; m.seeded = true; writeMeta(m);
+        Sync.firstPull = true;
+        if (Sync.status !== 'live') setSyncStatus('live');
+      });
+  }
+
+  /* 남의 기기 기록을 이 기기로 받아들이기 */
+  var DEVICE_SETTINGS = ['role', 'locked', 'stampChild', 'taskMember', 'studyChild', 'allowChild'];
+
+  function backupLocalState() {
+    try {
+      var raw = window.localStorage.getItem(STORE_KEY);
+      if (!raw || raw.length < 40) return;
+      var d = new Date();
+      var p = d.getFullYear() + pad2(d.getMonth() + 1) + pad2(d.getDate()) + '-' + pad2(d.getHours()) + pad2(d.getMinutes());
+      window.localStorage.setItem('familylog.backup.' + p, raw);
+    } catch (e) {}
+  }
+
+  function adoptRemote(data, remoteAt, keepHistory) {
+    Sync.applying = true;
+    var keepSettings = state.settings;
+    var keepChat = state.chat;
+    var keepHist = null;
+    if (keepHistory) {
+      backupLocalState();
+      keepHist = JSON.parse(JSON.stringify({
+        stars: state.stars || {}, ledger: state.ledger || {}, stamps: state.stamps || {}
+      }));
+    }
+    state = mergeState(data);
+    DEVICE_SETTINGS.forEach(function (k) { state.settings[k] = keepSettings[k]; });
+    if (!data || !Array.isArray(data.chat)) state.chat = keepChat;
+    if (keepHist) {
+      /* 이 기기에서만 쌓인 별·용돈·도장은 지우지 않고 합쳐 둔다 */
+      ['rona', 'taeri', 'mom', 'dad'].forEach(function (k) {
+        state.stars[k] = Math.max(Number(state.stars[k] || 0), Number(keepHist.stars[k] || 0));
+      });
+      ['rona', 'taeri'].forEach(function (k) {
+        var byId = {};
+        (state.ledger[k] || []).forEach(function (e) { byId[e.id] = e; });
+        (keepHist.ledger[k] || []).forEach(function (e) { byId[e.id] = e; });
+        state.ledger[k] = Object.keys(byId).map(function (i) { return byId[i]; }).sort(function (a, b) {
+          return String(a.date || '').localeCompare(String(b.date || ''));
+        });
+        state.stamps[k] = Object.assign({}, state.stamps[k] || {}, keepHist.stamps[k] || {});
+      });
+    }
+    var m = readMeta(); m.localAt = remoteAt; m.seeded = true; writeMeta(m);
+    Sync.remoteAt = remoteAt;
+    DataStore.save(state);
+    renderTabs();
+    renderCurrent();
+    Sync.applying = false;
+    if (ui.tab === 'chat') renderChat();
+    if (keepHist) pushState();   /* 합쳐진 기록을 가족 공용에도 반영 */
+  }
+
+  function pullState(initial) {
+    if (!Sync.client) return;
+    Sync.client.from('family_state')
+      .select('data,updated_at').eq('id', FAMILY_ID).maybeSingle()
+      .then(function (res) {
+        if (res.error) {
+          if (isMissingTable(res.error)) { Sync.stateTable = false; setSyncStatus('waiting'); }
+          else syncError(res.error);
+          return;
+        }
+        Sync.stateTable = true;
+        var row = res.data;
+        if (!row) { pushState(); }
+        else {
+          var remoteAt = Date.parse(row.updated_at) || 0;
+          if (!Sync.firstPull) {
+            Sync.firstPull = true;
+            if (readMeta().seeded && localEditAt() > remoteAt + 2000) { pushState(); }
+            else { adoptRemote(row.data, remoteAt, true); }
+          } else if (remoteAt > Sync.remoteAt) {
+            adoptRemote(row.data, remoteAt, false);
+          } else if (localEditAt() > remoteAt + 2000) {
+            pushState();                                  /* 오프라인 중 고친 기록 밀어 올리기 */
+          }
+        }
+        Sync.firstPull = true;
+        if (Sync.status !== 'live') setSyncStatus('live');
+        startRealtime();
+        ensureMessages(initial);
+      });
+  }
+
+  /* ---------------- 채팅 메시지 ---------------- */
+  function msgTimeLabel(iso) {
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return '';
+    var t = new Date(d.getTime() + d.getTimezoneOffset() * 60000 + 9 * 3600000);
+    var h = t.getHours();
+    var ap = h < 12 ? '오전' : '오후';
+    var hh = h % 12; if (hh === 0) hh = 12;
+    return ap + ' ' + hh + ':' + pad2(t.getMinutes());
+  }
+
+  function msgFromRow(r) {
+    return {
+      id: r.id,
+      member: r.sender || 'mom',
+      text: r.text || '',
+      sticker: r.sticker || '',
+      audio: r.audio || '',
+      hearts: r.likes || 0,
+      time: msgTimeLabel(r.created_at),
+      createdAt: r.created_at || '',
+      synced: true
+    };
+  }
+
+  function applyRows(rows) {
+    var byId = {};
+    state.chat.forEach(function (m) { byId[m.id] = m; });   /* 아직 못 올린 메시지도 지키기 */
+    rows.forEach(function (r) { byId[r.id] = msgFromRow(r); });
+    var list = Object.keys(byId).map(function (k) { return byId[k]; });
+    list.sort(function (a, b) {
+      var ta = a.createdAt ? Date.parse(a.createdAt) : 0;
+      var tb = b.createdAt ? Date.parse(b.createdAt) : 0;
+      if (ta === tb) return 0;
+      return ta - tb;
+    });
+    while (list.length > 300) list.shift();
+    state.chat = list;
+    DataStore.save(state);
+  }
+
+  function ensureMessages(initial) {
+    if (!Sync.client) return;
+    var q = Sync.client.from('family_messages')
+      .select('id,sender,text,sticker,audio,likes,created_at')
+      .order('created_at', { ascending: false })
+      .limit(initial ? 200 : 60);
+    if (!initial && Sync.lastMsgAt) q = q.gt('created_at', Sync.lastMsgAt);
+    q.then(function (res) {
+      if (res.error) {
+        if (isMissingTable(res.error)) { Sync.msgTable = false; return; }
+        Sync.msgTable = true;
+        syncError(res.error);
+        return;
+      }
+      Sync.msgTable = true;
+      var rows = (res.data || []).slice().reverse();   /* 오래된 것 → 최근 순 */
+      if (rows.length) Sync.lastMsgAt = rows[rows.length - 1].created_at || Sync.lastMsgAt;
+      if (rows.length) applyRows(rows);
+      uploadLocalMessages();
+      if (ui.tab === 'chat' && rows.length) renderChat();
+    });
+  }
+
+  function uploadLocalMessages() {
+    if (!Sync.client || !Sync.msgTable) return;
+    var pending = state.chat.filter(function (m) { return !m.synced; }).slice(-50);
+    if (!pending.length) return;
+    var rows = pending.map(function (m) {
+      return {
+        id: m.id,
+        sender: m.member || 'mom',
+        text: m.text || null,
+        sticker: m.sticker || null,
+        audio: m.audio || null,
+        likes: m.hearts || 0,
+        created_at: m.createdAt || new Date().toISOString()
+      };
+    });
+    Sync.client.from('family_messages').upsert(rows, { onConflict: 'id' }).then(function (res) {
+      if (res.error) { syncError(res.error); return; }
+      pending.forEach(function (m) { m.synced = true; });
+      DataStore.save(state);
+    });
+  }
+
+  function sendMessageRow(m) {
+    if (!Sync.client || !Sync.msgTable) return;
+    Sync.client.from('family_messages').insert({
+      id: m.id,
+      sender: m.member || 'mom',
+      text: m.text || null,
+      sticker: m.sticker || null,
+      audio: m.audio || null,
+      likes: m.hearts || 0,
+      created_at: m.createdAt || new Date().toISOString()
+    }).then(function (res) {
+      if (res.error) { syncError(res.error); return; }
+      m.synced = true;
+      DataStore.save(state);
+    });
+  }
+
+  function likeMessage(id) {
+    var found = null;
+    state.chat.forEach(function (c) { if (c.id === id) found = c; });
+    if (!found) return;
+    found.hearts = (found.hearts || 0) + 1;
+    saveChat();
+    renderChat();
+    if (!Sync.client || !Sync.msgTable || !found.synced) return;
+    Sync.client.from('family_messages').update({ likes: found.hearts }).eq('id', id).then(function (res) {
+      if (res.error) syncError(res.error);
+    });
+  }
+
+  /* ---------------- 실시간 채널 ---------------- */
+  function onStateChange(p) {
+    if (!p || p.eventType === 'DELETE') return;
+    var row = p.new;
+    if (!row || !row.data) return;
+    var at = Date.parse(row.updated_at) || 0;
+    if (at <= Sync.remoteAt) return;            /* 방금 내가 올린 변경 */
+    adoptRemote(row.data, at);
+  }
+
+  function onMessageChange(p) {
+    if (!p) return;
+    if (p.eventType === 'DELETE') {
+      var old = p.old || {};
+      if (!old.id) return;
+      state.chat = state.chat.filter(function (m) { return m.id !== old.id; });
+      DataStore.save(state);
+      if (ui.tab === 'chat') renderChat();
+      return;
+    }
+    var row = p.new;
+    if (!row || !row.id) return;
+    var found = null;
+    state.chat.forEach(function (m) { if (m.id === row.id) found = m; });
+    if (found) {
+      found.hearts = row.likes || 0;
+      if (row.text != null) found.text = row.text;
+      if (row.sticker != null) found.sticker = row.sticker;
+      if (row.audio != null) found.audio = row.audio;
+      found.synced = true;
+    } else {
+      state.chat.push(msgFromRow(row));
+      state.chat.sort(function (a, b) {
+        var ta = a.createdAt ? Date.parse(a.createdAt) : 0;
+        var tb = b.createdAt ? Date.parse(b.createdAt) : 0;
+        if (ta === tb) return 0;
+        return ta - tb;
+      });
+      while (state.chat.length > 300) state.chat.shift();
+    }
+    if (row.created_at && (!Sync.lastMsgAt || row.created_at > Sync.lastMsgAt)) Sync.lastMsgAt = row.created_at;
+    DataStore.save(state);
+    if (ui.tab === 'chat') renderChat();
+  }
+
+  function startRealtime() {
+    if (!Sync.client || Sync.channel || !Sync.stateTable) return;
+    Sync.channel = Sync.client.channel('family-log-sync')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'family_state', filter: 'id=eq.' + FAMILY_ID }, onStateChange)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'family_messages' }, onMessageChange)
+      .subscribe(function (status) {
+        if (status === 'SUBSCRIBED') { if (Sync.stateTable) setSyncStatus('live'); }
+        else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+          try { Sync.client.removeChannel(Sync.channel); } catch (e) {}
+          Sync.channel = null;
+          Sync.channelRetryAt = Date.now() + 60000;
+          if (Sync.stateTable) setSyncStatus('live');   /* 실시간이 잠깐 끊겨도 15초 폴링이 받아 줍니다 */
+        }
+      });
+  }
+
+  /* 15초 안전망 + 화면 다시 켠 순간 */
+  function syncTick() {
+    Sync.tick++;
+    if (!Sync.client) return;
+    if (!Sync.stateTable) { pullState(false); return; }
+    pullState(false);
+    if (!Sync.channel && Date.now() > (Sync.channelRetryAt || 0)) startRealtime();
+  }
+
+  function syncInit() {
+    if (!window.supabase || !window.supabase.createClient) { setSyncStatus('waiting'); return; }
+    try {
+      Sync.client = window.supabase.createClient(SB_URL, SB_KEY, {
+        auth: { persistSession: false, autoRefreshToken: false },
+        realtime: { params: { eventsPerSecond: 5 } }
+      });
+    } catch (e) { setSyncStatus('waiting'); return; }
+    pullState(true);
+    setInterval(function () {
+      if (document.visibilityState === 'visible') syncTick();
+    }, 15000);
+    document.addEventListener('visibilitychange', function () {
+      if (document.visibilityState === 'visible') syncTick();
+    });
+    window.addEventListener('online', function () { if (Sync.status === 'offline') setSyncStatus('idle'); syncTick(); });
+    window.addEventListener('offline', function () { setSyncStatus('offline'); });
+  }
 
   /* ---------------- 기본값 ---------------- */
   var MEMBERS = [
@@ -646,7 +1052,13 @@
   }
 
   var state = mergeState(DataStore.load());
-  function save() { DataStore.save(state); }
+  function save() {
+    DataStore.save(state);
+    if (Sync.applying) return;   /* 남의 변경을 그리는 중에는 되밀지 않기 */
+    schedulePush();
+  }
+  /* 채팅만 바뀐 경우: 가족 공용 state는 다시 올리지 않고 이 기기 캐시만 갱신 */
+  function saveChat() { DataStore.save(state); }
 
   var ui = { tab: 'home', weather: null, weatherLoading: false, rec: null, recChunks: [], recStart: 0, stream: null };
 
@@ -975,6 +1387,8 @@
 
     var list = state.chat;
     var el = $('#chatList');
+    /* 읽는 중이면 화면을 튀지 않게 — 맨 아래에 있을 때만 따라 내려가기 */
+    var stick = (el.scrollHeight - el.scrollTop - el.clientHeight) < 48;
     if (!list.length) {
       el.innerHTML = '<div class="empty" style="margin-top:10px;">첫 메시지를 남겨 보세요.</div>';
     } else {
@@ -984,7 +1398,7 @@
         var body = '';
         if (m.sticker) body = '<span class="sticker">' + escapeHtml(m.sticker) + '</span>';
         else if (m.audio) body = '<audio controls src="' + m.audio + '"></audio>';
-        else if (m.voice) body = '🎙️ 음성메모 ' + m.voice + '초 (이 기기에 저장)';
+        else if (m.voice) body = '🎙️ 음성메모 ' + m.voice + '초';
         else body = escapeHtml(m.text || '');
         return '<div class="bubble-row ' + (mine ? 'me' : '') + '">' +
           '<div class="avatar ' + who.tone + '" style="width:30px;height:30px;font-size:12.5px;">' + who.mono + '</div>' +
@@ -995,7 +1409,7 @@
             '<button class="heart" data-act="chat-heart" data-id="' + m.id + '">❤️ ' + (m.hearts || 0) + '</button>' +
           '</div></div>';
       }).join('');
-      el.scrollTop = el.scrollHeight;
+      if (stick) el.scrollTop = el.scrollHeight;
     }
 
     var locked = !!state.settings.locked;
@@ -1003,7 +1417,7 @@
     $('#stickerRow').classList.toggle('hidden', locked);
     $('#lockedNote').classList.toggle('hidden', !locked);
     $('#lockBtn').textContent = locked ? '🔒 잠금됨' : '🔓 이 기기 잠금';
-    $('#chatBanner').classList.toggle('hidden', false);
+    renderSyncBadge();
   }
 
   function memberOf(id) {
@@ -1169,7 +1583,7 @@
       '</div>' +
       '<div class="card" style="box-shadow:none;">' +
         '<div class="card-head"><h2 style="font-size:14px;">기록 지우기</h2></div>' +
-        '<p class="mini">이 기기에 저장된 기록을 모두 지워요. 되돌릴 수 없어요.</p>' +
+        '<p class="mini">이 기기에 저장된 기록만 지워요. 가족이 같이 보는 공용 기록은 그대로 남아 있어요.</p>' +
         '<button class="btn ghost" style="margin-top:10px;width:100%;color:#C9708A;" data-act="reset-all">모든 기록 지우기</button>' +
       '</div>'
     );
@@ -1185,6 +1599,7 @@
       return;
     }
     var act = target.getAttribute('data-act');
+    markLocalEdit();
 
     if (act === 'tab') { setTab(target.getAttribute('data-tab')); return; }
 
@@ -1224,14 +1639,27 @@
       return;
     }
     if (act === 'reset-all') {
-      if (window.confirm('이 기기의 기록을 모두 지울까요? 되돌릴 수 없어요.')) {
+      var liveNow = Sync.status === 'live';
+      var ask = liveNow
+        ? '이 기기에 저장된 기록을 지울까요?\n가족 공용 기록은 서버에 그대로 남아 있고, 다시 불러올게요.'
+        : '이 기기의 기록을 모두 지울까요? 되돌릴 수 없어요.';
+      if (window.confirm(ask)) {
         DataStore.reset();
         state = defaultState();
-        save();
+        DataStore.save(state);
         closeModal();
         renderTabs();
         renderCurrent();
-        toast('기록을 지웠어요');
+        if (liveNow) {
+          Sync.firstPull = true;
+          Sync.remoteAt = 0;
+          Sync.lastMsgAt = '';
+          pullState(false);
+          toast('이 기기만 비우고 가족 기록을 다시 불러왔어요');
+        } else {
+          save();
+          toast('기록을 지웠어요');
+        }
       }
       return;
     }
@@ -1348,15 +1776,15 @@
     if (act === 'chat-send') { sendChat(); return; }
     if (act === 'sticker') { sendSticker(target.getAttribute('data-sticker')); return; }
     if (act === 'chat-heart') {
-      var mid2 = target.getAttribute('data-id');
-      state.chat.forEach(function (c) { if (c.id === mid2) c.hearts = (c.hearts || 0) + 1; });
-      save(); renderChat(); return;
+      likeMessage(target.getAttribute('data-id'));
+      return;
     }
     if (act === 'rec-toggle') { toggleRecording(); return; }
   });
 
   document.addEventListener('keydown', function (ev) {
     if (ev.key !== 'Enter') return;
+    markLocalEdit();
     var id = ev.target.id;
     if (id === 'taskInput') { ev.preventDefault(); addTask(); }
     else if (id === 'studyInput') { ev.preventDefault(); addStudy(); }
@@ -1467,10 +1895,12 @@
 
   /* ---------------- 채팅 동작 ---------------- */
   function pushChat(msg) {
+    if (!msg.createdAt) msg.createdAt = new Date().toISOString();
     state.chat.push(msg);
     if (state.chat.length > 300) state.chat = state.chat.slice(-300);
-    save();
+    saveChat();
     renderChat();
+    sendMessageRow(msg);
   }
   function sendChat() {
     if (state.settings.locked) { toast('잠금을 풀어야 보낼 수 있어요'); return; }
@@ -1493,7 +1923,6 @@
     }
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.MediaRecorder) {
       toast('이 브라우저에서는 음성 녹음이 지원되지 않아요');
-      pushChat({ id: uid(), member: state.settings.role, voice: 0, time: nowTime(), hearts: 0 });
       return;
     }
     navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
@@ -1516,7 +1945,7 @@
           };
           fr.readAsDataURL(blob);
         } else {
-          pushChat({ id: uid(), member: state.settings.role, voice: dur, time: nowTime(), hearts: 0 });
+          pushChat({ id: uid(), member: state.settings.role, text: '🎙️ 음성메모 ' + dur + '초', time: nowTime(), hearts: 0 });
         }
       };
       rec.start();
@@ -1533,6 +1962,8 @@
   function boot() {
     renderTabs();
     renderCurrent();
+    renderSyncBadge();
+    syncInit();
     /* 날씨는 홈이 아니어도 미리 받아 둔다 */
     if (!ui.weather) loadWeather();
     /* 날짜가 바뀌면 자동 갱신 */
