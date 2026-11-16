@@ -662,8 +662,10 @@
     state = mergeState(data);
     DEVICE_SETTINGS.forEach(function (k) { state.settings[k] = keepSettings[k]; });
     if (!data || !Array.isArray(data.chat)) state.chat = keepChat;
+    var histChanged = false;
     if (keepHist) {
       /* 이 기기에서만 쌓인 별·용돈·도장은 지우지 않고 합쳐 둔다 */
+      var beforeHist = JSON.stringify({ s: state.stars, l: state.ledger, t: state.stamps });
       ['rona', 'taeri', 'mom', 'dad'].forEach(function (k) {
         state.stars[k] = Math.max(Number(state.stars[k] || 0), Number(keepHist.stars[k] || 0));
       });
@@ -676,6 +678,7 @@
         });
         state.stamps[k] = Object.assign({}, state.stamps[k] || {}, keepHist.stamps[k] || {});
       });
+      histChanged = JSON.stringify({ s: state.stars, l: state.ledger, t: state.stamps }) !== beforeHist;
     }
     var m = readMeta(); m.localAt = remoteAt; m.seeded = true; writeMeta(m);
     Sync.remoteAt = remoteAt;
@@ -684,7 +687,7 @@
     renderCurrent();
     Sync.applying = false;
     if (ui.tab === 'chat') renderChat();
-    if (keepHist) pushState();   /* 합쳐진 기록을 가족 공용에도 반영 */
+    if (histChanged) pushState();   /* 합쳐진 기록이 있으면 가족 공용에도 반영 */
   }
 
   function pullState(initial) {
