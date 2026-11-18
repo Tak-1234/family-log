@@ -660,7 +660,7 @@
     $('#msgToastBody').textContent = msgPreview(m);
     el.classList.add('show');
     clearTimeout(Notify.toastTimer);
-    Notify.toastTimer = setTimeout(function () { el.classList.remove('show'); }, 4200);
+    Notify.toastTimer = setTimeout(function () { el.classList.remove('show'); }, 6000);
   }
 
   /* ---------- 소리 (Web Audio, 음원 파일 없이) ---------- */
