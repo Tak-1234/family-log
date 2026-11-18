@@ -1953,6 +1953,13 @@
         DataStore.reset();
         state = defaultState();
         DataStore.save(state);
+        /* 다시 불러오는 기존 메시지는 알림 없이 지나가게 */
+        Notify.primed = false;
+        Notify.seen = {};
+        Notify.own = {};
+        Notify.unread = 0;
+        refreshBadge();
+        hideMsgToast();
         closeModal();
         renderTabs();
         renderCurrent();
