@@ -256,8 +256,18 @@
   }
   nav.tabs .inner{max-width:560px;margin:0 auto;display:flex;gap:2px;justify-content:space-between;}
   nav.tabs button{
+    position:relative;
     flex:1 1 0;min-width:0;display:flex;flex-direction:column;align-items:center;gap:3px;
     padding:5px 0 3px;border-radius:12px;color:var(--muted);
+  }
+  .tab-badge{
+    position:absolute;top:0;left:50%;margin-left:4px;
+    min-width:17px;height:17px;padding:0 4px;border-radius:999px;
+    background:#E2605A;color:#fff;
+    font-size:10px;font-weight:700;line-height:17px;letter-spacing:0;text-align:center;
+    border:1.5px solid rgba(255,253,245,.95);
+    box-shadow:0 1px 4px rgba(214,96,90,.3);
+    pointer-events:none;
   }
   nav.tabs button .ico{font-size:17px;line-height:1;filter:grayscale(1) opacity(.65);}
   nav.tabs button .lbl{font-size:9.5px;letter-spacing:-0.02em;}
@@ -284,6 +294,20 @@
     transition:opacity .2s, transform .2s;pointer-events:none;
   }
   .toast.show{opacity:1;transform:translateX(-50%) translateY(-4px);}
+  .toast-in{
+    position:fixed;left:50%;top:calc(10px + env(safe-area-inset-top));
+    transform:translate(-50%,-150%);
+    width:calc(100% - 28px);max-width:420px;
+    background:rgba(55,49,46,.96);color:#fff;text-align:left;
+    border-radius:16px;padding:11px 14px;z-index:70;
+    box-shadow:0 12px 28px rgba(58,51,48,.22);
+    opacity:0;pointer-events:none;
+    transition:opacity .22s ease, transform .26s ease;
+    display:flex;flex-direction:column;gap:2px;
+  }
+  .toast-in.show{opacity:1;transform:translate(-50%,0);pointer-events:auto;}
+  .toast-in .who{font-size:11.5px;font-weight:650;color:#F7DDB9;}
+  .toast-in .body{font-size:13.5px;line-height:1.35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 
   .cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:6px;margin-top:10px;}
   .cal-cell{
@@ -472,6 +496,10 @@
         <button class="pill" data-act="chat-lock" id="lockBtn">🔓 이 기기 잠금</button>
       </div>
       <div class="banner" id="chatBanner"><span class="dot"></span><b>연결 대기 중</b> · 지금은 이 기기에 저장되고 있어요.</div>
+      <div class="row" style="gap:6px;flex-wrap:wrap;margin-bottom:10px;">
+        <button class="pill" data-act="sound-toggle" id="soundBtn">🔔 알림음 켬</button>
+        <button class="pill hidden" data-act="notify-ask" id="permBtn">📱 기기 알림 켜기</button>
+      </div>
       <div class="seg" id="roleSeg" style="margin-bottom:12px;"></div>
       <div class="chat-wrap grow" id="chatList" style="overflow-y:auto;max-height:46vh;min-height:120px;"></div>
       <div class="stickers" id="stickerRow"></div>
@@ -493,6 +521,10 @@
   <div class="modal" id="modalBody"></div>
 </div>
 <div class="toast" id="toast"></div>
+<div class="toast-in" id="msgToast" data-act="msg-toast-open" role="button" aria-live="polite">
+  <span class="who" id="msgToastWho"></span>
+  <span class="body" id="msgToastBody"></span>
+</div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
@@ -547,6 +579,248 @@
     channel: null,
     announced: false
   };
+
+  /* =========================================================
+     새 메시지 알림 — 배지 · 딩동 · 토스트 · 기기 알림
+     · 첫 불러오기(기존 메시지)에는 울리지 않는다
+     · 이 기기에서 보낸 메시지에는 울리지 않는다
+     ========================================================= */
+  var NOTIFY_KEY = 'familylog.notify.v1';
+  var Notify = {
+    primed: false,     /* 기존 메시지 불러오기가 끝났는지 */
+    seen: {},          /* 이미 알림 판단을 마친 메시지 id */
+    own: {},           /* 이 기기에서 보낸 메시지 id */
+    unread: 0,
+    sound: true,
+    ctx: null,
+    toastTimer: null,
+    lastChime: 0
+  };
+  (function () {
+    try {
+      var raw = window.localStorage.getItem(NOTIFY_KEY);
+      var saved = raw ? JSON.parse(raw) : null;
+      if (saved && saved.sound === false) Notify.sound = false;
+    } catch (e) {}
+  })();
+
+  function saveNotifyPref() {
+    try { window.localStorage.setItem(NOTIFY_KEY, JSON.stringify({ sound: !!Notify.sound })); } catch (e) {}
+  }
+
+  function badgeText(n) { return n > 99 ? '99+' : String(n); }
+
+  function chatInView() { return !document.hidden && ui.tab === 'chat'; }
+
+  function refreshBadge() {
+    var btn = document.querySelector('#tabBar button[data-tab="chat"]');
+    if (btn) {
+      var b = btn.querySelector('.tab-badge');
+      if (Notify.unread > 0) {
+        if (!b) { b = document.createElement('span'); b.className = 'tab-badge'; btn.appendChild(b); }
+        b.textContent = badgeText(Notify.unread);
+      } else if (b && b.parentNode) {
+        b.parentNode.removeChild(b);
+      }
+    }
+    document.title = Notify.unread > 0 ? '(' + badgeText(Notify.unread) + ') 우리 가족 기록장' : '우리 가족 기록장';
+  }
+
+  function clearUnread() {
+    if (Notify.unread === 0) return;
+    Notify.unread = 0;
+    refreshBadge();
+  }
+
+  /* 채팅을 보고 있으면 읽은 것으로 친다 */
+  function refreshUnread() {
+    if (!chatInView()) return;
+    clearUnread();
+    hideMsgToast();
+  }
+
+  function hideMsgToast() {
+    var el = $('#msgToast');
+    if (el) el.classList.remove('show');
+    clearTimeout(Notify.toastTimer);
+  }
+
+  function msgPreview(m) {
+    if (!m) return '';
+    if (m.sticker) return m.sticker;
+    if (m.audio) return '🎙️ 음성메모';
+    var t = String(m.text || '').replace(/\s+/g, ' ').trim();
+    return t.length > 70 ? t.slice(0, 70) + '…' : t;
+  }
+
+  function showMsgToast(m) {
+    var el = $('#msgToast');
+    if (!el) return;
+    $('#msgToastWho').textContent = memberOf(m.member).name + ' · 새 메시지';
+    $('#msgToastBody').textContent = msgPreview(m);
+    el.classList.add('show');
+    clearTimeout(Notify.toastTimer);
+    Notify.toastTimer = setTimeout(function () { el.classList.remove('show'); }, 6000);
+  }
+
+  /* ---------- 소리 (Web Audio, 음원 파일 없이) ---------- */
+  function audioCtx() {
+    var Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return null;
+    if (!Notify.ctx) {
+      try { Notify.ctx = new Ctx(); } catch (e) { return null; }
+    }
+    if (Notify.ctx.state === 'suspended') {
+      try {
+        var p = Notify.ctx.resume();
+        if (p && typeof p.then === 'function') p.catch(function () {});
+      } catch (e) {}
+    }
+    return Notify.ctx;
+  }
+
+  /* 휴대폰이 소리를 막아 두지 않도록 첫 터치에서 미리 열어 둔다 */
+  function unlockAudio() {
+    var ctx = audioCtx();
+    if (!ctx) return;
+    try {
+      var b = ctx.createBufferSource();
+      b.buffer = ctx.createBuffer(1, 1, 22050);
+      b.connect(ctx.destination);
+      b.start(0);
+    } catch (e) {}
+  }
+
+  function playChime() {
+    if (!Notify.sound) return;
+    var ctx = audioCtx();
+    if (!ctx) return;
+    if (ctx.state !== 'running') {
+      try {
+        var p = ctx.resume();
+        if (p && typeof p.then === 'function') p.then(function () { chimeAt(ctx); }).catch(function () {});
+      } catch (e) {}
+      return;
+    }
+    chimeAt(ctx);
+  }
+
+  /* 부드러운 2음 차임벨 (딩–동) */
+  function chimeAt(ctx) {
+    if (!Notify.sound) return;
+    try {
+      var t0 = ctx.currentTime + 0.01;
+      [{ f: 987.77, at: 0, len: 0.5 }, { f: 783.99, at: 0.19, len: 0.62 }].forEach(function (n) {
+        var env = ctx.createGain();
+        env.connect(ctx.destination);
+        env.gain.setValueAtTime(0.0001, t0 + n.at);
+        env.gain.exponentialRampToValueAtTime(0.12, t0 + n.at + 0.015);
+        env.gain.exponentialRampToValueAtTime(0.0001, t0 + n.at + n.len);
+        [1, 2.01].forEach(function (mult, i) {
+          var o = ctx.createOscillator();
+          var g2 = ctx.createGain();
+          o.type = 'sine';
+          o.frequency.value = n.f * mult;
+          g2.gain.value = i === 0 ? 1 : 0.18;
+          o.connect(g2); g2.connect(env);
+          o.start(t0 + n.at); o.stop(t0 + n.at + n.len + 0.06);
+        });
+      });
+    } catch (e) {}
+  }
+
+  /* ---------- 브라우저(기기) 알림 ---------- */
+  function nativeSupported() { return typeof window.Notification !== 'undefined'; }
+
+  function nativeNotify(m) {
+    if (!nativeSupported()) return;
+    if (window.Notification.permission !== 'granted') return;
+    if (!document.hidden) return;          /* 화면을 보고 있을 때는 토스트로 충분 */
+    try {
+      var n = new window.Notification('우리 가족 채팅 · ' + memberOf(m.member).name, {
+        body: msgPreview(m),
+        tag: 'family-log-chat',
+        silent: true
+      });
+      if (!n) return;
+      n.onclick = function () {
+        try { window.focus(); } catch (e) {}
+        setTab('chat');
+        try { n.close(); } catch (e) {}
+      };
+      setTimeout(function () { try { n.close(); } catch (e) {} }, 12000);
+    } catch (e) {}
+  }
+
+  function renderNotifyControls() {
+    var s = $('#soundBtn');
+    if (s) {
+      s.textContent = Notify.sound ? '🔔 알림음 켬' : '🔕 알림음 끔';
+      s.title = Notify.sound ? '눌러서 알림음 끄기' : '눌러서 알림음 켜기';
+    }
+    var p = $('#permBtn');
+    if (!p) return;
+    if (!nativeSupported()) { p.classList.add('hidden'); return; }
+    p.classList.remove('hidden');
+    var perm = window.Notification.permission;
+    if (perm === 'granted') { p.textContent = '📱 기기 알림 켜짐'; p.style.opacity = '.6'; }
+    else if (perm === 'denied') { p.textContent = '📱 기기 알림 꺼짐'; p.style.opacity = '.6'; }
+    else { p.textContent = '📱 기기 알림 켜기'; p.style.opacity = ''; }
+  }
+
+  function afterPermission(r) {
+    renderNotifyControls();
+    if (r === 'granted') toast('기기 알림을 켰어요');
+    else toast('기기 알림은 켜지 않았어요');
+  }
+
+  function askNativePermission() {
+    if (!nativeSupported()) { toast('이 브라우저는 기기 알림을 지원하지 않아요'); return; }
+    var perm = window.Notification.permission;
+    if (perm === 'granted') { toast('기기 알림이 이미 켜져 있어요'); return; }
+    if (perm === 'denied') { toast('브라우저 설정에서 이 사이트 알림을 허용해 주세요'); return; }
+    try {
+      var answered = false;
+      function finish(r) {
+        if (answered) return;
+        answered = true;
+        afterPermission(r);
+      }
+      var res = window.Notification.requestPermission(finish);
+      if (res && typeof res.then === 'function') res.then(finish).catch(function () {});
+    } catch (e) {
+      toast('이 브라우저에서는 기기 알림을 켤 수 없어요');
+    }
+  }
+
+  /* ---------- 새 메시지 하나에 대한 알림 판단 ---------- */
+  function primeNotifications() {
+    state.chat.forEach(function (m) { Notify.seen[m.id] = true; });
+    Notify.primed = true;
+    refreshBadge();
+  }
+
+  function noteIncoming(m) {
+    if (!m || !m.id) return;
+    if (Notify.seen[m.id]) return;
+    Notify.seen[m.id] = true;
+    if (Notify.own[m.id]) return;      /* 이 기기에서 방금 보낸 메시지 */
+    if (!Notify.primed) return;        /* 첫 불러오기이던 기존 메시지 */
+
+    if (chatInView()) {
+      clearUnread();                   /* 지금 읽고 있으면 배지는 없다 */
+    } else {
+      Notify.unread += 1;
+      refreshBadge();
+    }
+
+    if (Date.now() - Notify.lastChime > 1200) {
+      Notify.lastChime = Date.now();
+      playChime();
+    }
+    nativeNotify(m);
+    if (!document.hidden && ui.tab !== 'chat') showMsgToast(m);
+  }
 
   function readMeta() {
     try { var raw = window.localStorage.getItem(META_KEY); return raw ? JSON.parse(raw) : {}; }
@@ -750,7 +1024,13 @@
   function applyRows(rows) {
     var byId = {};
     state.chat.forEach(function (m) { byId[m.id] = m; });   /* 아직 못 올린 메시지도 지키기 */
-    rows.forEach(function (r) { byId[r.id] = msgFromRow(r); });
+    var fresh = [];                                         /* 이번에 처음 들어온 메시지 */
+    rows.forEach(function (r) {
+      var had = !!byId[r.id];
+      var m = msgFromRow(r);
+      byId[r.id] = m;
+      if (!had) fresh.push(m);
+    });
     var list = Object.keys(byId).map(function (k) { return byId[k]; });
     list.sort(function (a, b) {
       var ta = a.createdAt ? Date.parse(a.createdAt) : 0;
@@ -761,6 +1041,8 @@
     while (list.length > 300) list.shift();
     state.chat = list;
     DataStore.save(state);
+    fresh.forEach(noteIncoming);
+    if (!Notify.primed) primeNotifications();
   }
 
   function ensureMessages(initial) {
@@ -781,6 +1063,7 @@
       var rows = (res.data || []).slice().reverse();   /* 오래된 것 → 최근 순 */
       if (rows.length) Sync.lastMsgAt = rows[rows.length - 1].created_at || Sync.lastMsgAt;
       if (rows.length) applyRows(rows);
+      if (!Notify.primed) primeNotifications();
       uploadLocalMessages();
       if (ui.tab === 'chat' && rows.length) renderChat();
     });
@@ -869,7 +1152,8 @@
       if (row.audio != null) found.audio = row.audio;
       found.synced = true;
     } else {
-      state.chat.push(msgFromRow(row));
+      var added = msgFromRow(row);
+      state.chat.push(added);
       state.chat.sort(function (a, b) {
         var ta = a.createdAt ? Date.parse(a.createdAt) : 0;
         var tb = b.createdAt ? Date.parse(b.createdAt) : 0;
@@ -877,6 +1161,7 @@
         return ta - tb;
       });
       while (state.chat.length > 300) state.chat.shift();
+      noteIncoming(added);
     }
     if (row.created_at && (!Sync.lastMsgAt || row.created_at > Sync.lastMsgAt)) Sync.lastMsgAt = row.created_at;
     DataStore.save(state);
@@ -1124,8 +1409,10 @@
   function renderTabs() {
     var bar = $('#tabBar');
     bar.innerHTML = TABS.map(function (t) {
+      var badge = (t.id === 'chat' && Notify.unread > 0)
+        ? '<span class="tab-badge">' + badgeText(Notify.unread) + '</span>' : '';
       return '<button data-act="tab" data-tab="' + t.id + '" class="' + (ui.tab === t.id ? 'on' : '') + '">' +
-        '<span class="ico">' + t.ico + '</span><span class="lbl">' + t.label + '</span></button>';
+        '<span class="ico">' + t.ico + '</span><span class="lbl">' + t.label + '</span>' + badge + '</button>';
     }).join('');
     TABS.forEach(function (t) {
       var v = $('#view-' + t.id);
@@ -1137,6 +1424,7 @@
     ui.tab = id;
     renderTabs();
     renderCurrent();
+    refreshUnread();            /* 채팅을 열었으면 안 읽은 개수 0 */
     window.scrollTo(0, 0);
   }
 
@@ -1423,6 +1711,7 @@
     $('#stickerRow').classList.toggle('hidden', locked);
     $('#lockedNote').classList.toggle('hidden', !locked);
     $('#lockBtn').textContent = locked ? '🔒 잠금됨' : '🔓 이 기기 잠금';
+    renderNotifyControls();
     renderSyncBadge();
   }
 
@@ -1608,6 +1897,17 @@
     markLocalEdit();
 
     if (act === 'tab') { setTab(target.getAttribute('data-tab')); return; }
+    if (act === 'msg-toast-open') { hideMsgToast(); setTab('chat'); return; }
+
+    if (act === 'sound-toggle') {
+      Notify.sound = !Notify.sound;
+      saveNotifyPref();
+      renderNotifyControls();
+      if (Notify.sound) { unlockAudio(); playChime(); }
+      toast(Notify.sound ? '알림음을 켰어요' : '알림음을 껐어요');
+      return;
+    }
+    if (act === 'notify-ask') { askNativePermission(); return; }
 
     if (act === 'praise') {
       var m = target.getAttribute('data-member');
@@ -1903,6 +2203,8 @@
   /* ---------------- 채팅 동작 ---------------- */
   function pushChat(msg) {
     if (!msg.createdAt) msg.createdAt = new Date().toISOString();
+    Notify.own[msg.id] = true;    /* 이 기기에서 보낸 메시지 — 알림·배지 없음 */
+    Notify.seen[msg.id] = true;
     state.chat.push(msg);
     if (state.chat.length > 300) state.chat = state.chat.slice(-300);
     saveChat();
@@ -1970,6 +2272,13 @@
     renderTabs();
     renderCurrent();
     renderSyncBadge();
+    refreshBadge();
+    /* 첫 터치에서 소리를 열어 두고, 화면을 다시 켜면 읽음 처리 */
+    ['pointerdown', 'touchstart', 'mousedown', 'keydown'].forEach(function (evt) {
+      document.addEventListener(evt, unlockAudio, true);
+    });
+    document.addEventListener('visibilitychange', refreshUnread);
+    window.addEventListener('focus', refreshUnread);
     syncInit();
     /* 날씨는 홈이 아니어도 미리 받아 둔다 */
     if (!ui.weather) loadWeather();
